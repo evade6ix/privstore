@@ -204,16 +204,22 @@ app.post('/api/sales', requireAuth, asyncRoute(async (req, res) => {
       changed.push(item);
     }
     const gross = round(items.reduce((a, i) => a + i.lineTotal, 0));
-    const salespersonCut = round(items.reduce((a, i) => a + i.salespersonCut, 0));
+    const computedCut = round(items.reduce((a, i) => a + i.salespersonCut, 0));
+    const requestedName = String(req.body.saleNumber || '').trim();
+    const saleNumber = requestedName || await nextSaleNumber();
+    const existing = await Sale.findOne({ saleNumber }).select('_id').lean();
+    if (existing) throw Object.assign(new Error('That order name is already in use.'), { status: 409 });
+    const requestedCut = req.body.salespersonCut == null || req.body.salespersonCut === '' ? computedCut : round(Number(req.body.salespersonCut));
+    if (!Number.isFinite(requestedCut) || requestedCut < 0 || requestedCut > gross) throw Object.assign(new Error(`Karl's cut must be between $0 and the sale total.`), { status: 400 });
     const sale = await Sale.create({
-      saleNumber: await nextSaleNumber(),
+      saleNumber,
       items,
       customerName: String(req.body.customerName || ''),
       paymentMethod: ['cash', 'etransfer', 'card', 'other'].includes(req.body.paymentMethod) ? req.body.paymentMethod : 'cash',
       notes: String(req.body.notes || ''),
       gross,
-      salespersonCut,
-      storeShare: round(gross - salespersonCut)
+      salespersonCut: requestedCut,
+      storeShare: round(gross - requestedCut)
     });
     await InventoryTransaction.insertMany(items.map(i => ({ variantId: i.variantId, type: 'SALE', quantity: -i.quantity, relatedSaleId: sale._id, note: sale.saleNumber })));
     publish('sale', { saleId: sale._id, saleNumber: sale.saleNumber });
@@ -228,6 +234,40 @@ app.get('/api/sales', requireAuth, asyncRoute(async (req, res) => {
   const limit = Math.min(100, Math.max(1, Number(req.query.limit || 50)));
   const items = await Sale.find().sort({ createdAt: -1 }).limit(limit).lean();
   res.json({ items });
+}));
+
+app.patch('/api/sales/:id', requireAuth, asyncRoute(async (req, res) => {
+  const sale = await Sale.findById(req.params.id);
+  if (!sale) return res.status(404).json({ error: 'Sale not found.' });
+  if (req.body.saleNumber != null) {
+    const saleNumber = String(req.body.saleNumber).trim();
+    if (!saleNumber) return res.status(400).json({ error: 'Order name cannot be blank.' });
+    const existing = await Sale.findOne({ saleNumber, _id: { $ne: sale._id } }).select('_id').lean();
+    if (existing) return res.status(409).json({ error: 'That order name is already in use.' });
+    sale.saleNumber = saleNumber;
+  }
+  if (req.body.salespersonCut != null) {
+    const cut = round(Number(req.body.salespersonCut));
+    if (!Number.isFinite(cut) || cut < 0 || cut > sale.gross) return res.status(400).json({ error: `Karl's cut must be between $0 and the sale total.` });
+    sale.salespersonCut = cut;
+    sale.storeShare = round(sale.gross - cut);
+  }
+  await sale.save();
+  publish('sale', { saleId: sale._id, saleNumber: sale.saleNumber });
+  res.json(sale);
+}));
+
+app.delete('/api/sales/:id', requireAuth, asyncRoute(async (req, res) => {
+  const sale = await Sale.findById(req.params.id);
+  if (!sale) return res.status(404).json({ error: 'Sale not found.' });
+  if (sale.status === 'completed') {
+    for (const item of sale.items) await Holding.updateOne({ variantId: item.variantId }, { $inc: { availableQty: item.quantity } });
+  }
+  await InventoryTransaction.deleteMany({ relatedSaleId: sale._id });
+  await Settlement.updateMany({ saleIds: sale._id }, { $pull: { saleIds: sale._id } });
+  await sale.deleteOne();
+  publish('sale', { saleId: req.params.id, deleted: true });
+  res.json({ ok: true });
 }));
 
 app.post('/api/sales/:id/void', requireAuth, asyncRoute(async (req, res) => {
