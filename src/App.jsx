@@ -50,7 +50,7 @@ const ProductThumb = ({ item }) => <div className="thumb">{item.image ? <img src
 function Inventory({ holdings, reload }) {
   const [query, setQuery] = useState('');
   const [selected, setSelected] = useState(null);
-  const filtered = holdings.filter(h => [h.title, h.variantTitle, h.sku].some(v => String(v).toLowerCase().includes(query.toLowerCase())));
+  const filtered = holdings.filter(h => h.availableQty > 0 && [h.title, h.variantTitle, h.sku].some(v => String(v).toLowerCase().includes(query.toLowerCase())));
   return <div className="page"><div className="page-title"><div><p className="eyebrow">HOLDING</p><h1>Inventory</h1></div><span className="pill">{holdings.reduce((a,h)=>a+h.availableQty,0)} units</span></div><div className="search"><Search size={18}/><input value={query} onChange={e=>setQuery(e.target.value)} placeholder="Search your inventory"/></div>
   <div className="stack">{filtered.map(h => <button className="product-row" key={h._id} onClick={()=>setSelected(h)}><ProductThumb item={h}/><div className="grow"><strong>{h.title}</strong><span>{h.variantTitle || h.sku || 'Default variant'}</span><small>{money(h.defaultPrice)} · Cut {h.cutType === 'percentage' ? `${h.cutValue}%` : money(h.cutValue)}</small></div><b>{h.availableQty}</b></button>)}</div>
   <AnimatePresence>{selected && <InventorySheet item={selected} close={()=>setSelected(null)} reload={reload}/>}</AnimatePresence></div>;
